@@ -6,7 +6,8 @@ const DEFAULT_PATRIMONIOS = [
   { patrimonio: "1385231", kitNumero: "Kit 04" },
   { patrimonio: "1385219", kitNumero: "Kit 05" },
   { patrimonio: "1385222", kitNumero: "Kit 06" },
-  { patrimonio: "1385230", kitNumero: "Kit 07" }
+  { patrimonio: "1385230", kitNumero: "Kit 07" },
+  { patrimonio: "1385227", kitNumero: "Kit 08" }
 ];
 
 const DEFAULT_ALUNOS = [
