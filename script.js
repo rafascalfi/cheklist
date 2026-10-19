@@ -148,12 +148,17 @@ function loadState() {
     console.error("Erro ao carregar dados do navegador:", e);
   }
 
-  // Garantir que todos os 7 patrimônios existam
+  // Garantir que todos os 8 patrimônios existam
+  let addedNew = false;
   DEFAULT_PATRIMONIOS.forEach(p => {
     if (!state.kits[p.patrimonio]) {
       state.kits[p.patrimonio] = createEmptyKitData(p.patrimonio, p.kitNumero);
+      addedNew = true;
     }
   });
+  if (addedNew) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
 }
 
 function saveState(toastMsg) {
