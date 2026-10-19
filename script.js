@@ -88,7 +88,11 @@ const CHECKLIST_ITEMS_TEMPLATE = [
   }
 ];
 
-const STORAGE_KEY = "canon_r50_checklist_v1";
+const STORAGE_KEY = "canon_r50_checklist_v2";
+const KV_APP_KEY = "m72dp79u";
+const KV_BASE_URL = `https://keyvalue.immanuel.co/api/KeyVal`;
+const NTFY_TOPIC = "canon_r50_sync_rafascalfi_v3";
+const CLIENT_ID = "cli_" + Math.random().toString(36).slice(2, 10);
 
 let state = {
   selectedPatrimonio: DEFAULT_PATRIMONIOS[0].patrimonio,
@@ -96,12 +100,15 @@ let state = {
   kits: {}
 };
 
+let cloudSaveTimers = {};
+let sseConnection = null;
+
 function createEmptyKitData(patrimonio, kitNumero) {
   const itens = {};
   CHECKLIST_ITEMS_TEMPLATE.forEach(t => {
     itens[t.id] = {
-      retirada: "", // "OK" | "AVARIADO" | ""
-      devolucao: "", // "OK" | "AVARIADO" | ""
+      retirada: "",
+      devolucao: "",
       detalheAvaria: ""
     };
   });
@@ -124,18 +131,316 @@ function createEmptyKitData(patrimonio, kitNumero) {
   return {
     patrimonio,
     kitNumero,
-    statusManual: "disponivel", // "disponivel" | "em_uso" | "avaria"
+    statusManual: "disponivel",
     alunoResponsavel: "",
     turmaGrupo: "",
     integrantesGrupo: [],
     itens,
-    dias
+    dias,
+    updatedAt: 0
   };
+}
+
+// Compactação para armazenamento em nuvem rápido e leve
+function packKit(kit) {
+  const compactItens = {};
+  CHECKLIST_ITEMS_TEMPLATE.forEach(t => {
+    const it = kit.itens[t.id];
+    if (it && (it.retirada || it.devolucao || it.detalheAvaria)) {
+      compactItens[t.id] = [it.retirada || "", it.devolucao || "", it.detalheAvaria || ""];
+    }
+  });
+
+  const compactDias = {};
+  (kit.dias || []).forEach((d, idx) => {
+    if (
+      d.data ||
+      d.retiradaHora ||
+      d.retiradaAluno ||
+      d.retiradaProf ||
+      d.devolucaoHora ||
+      d.devolucaoAluno ||
+      d.devolucaoProf ||
+      d.observacoes
+    ) {
+      compactDias[idx] = [
+        d.dia || `Dia ${idx + 1}`,
+        d.data || "",
+        d.retiradaHora || "",
+        d.retiradaAluno || "",
+        d.retiradaProf || "",
+        d.devolucaoHora || "",
+        d.devolucaoAluno || "",
+        d.devolucaoProf || "",
+        d.observacoes || ""
+      ];
+    }
+  });
+
+  return {
+    p: kit.patrimonio,
+    k: kit.kitNumero || "",
+    s: kit.statusManual || "disponivel",
+    a: kit.alunoResponsavel || "",
+    t: kit.turmaGrupo || "",
+    g: kit.integrantesGrupo || [],
+    n: Math.max(9, (kit.dias || []).length),
+    i: compactItens,
+    d: compactDias,
+    u: kit.updatedAt || Date.now()
+  };
+}
+
+function unpackKit(defaultPatrimonio, defaultKitNum, packed) {
+  const base = createEmptyKitData(defaultPatrimonio, defaultKitNum);
+  if (!packed || typeof packed !== "object") return base;
+
+  base.kitNumero = packed.k || defaultKitNum;
+  base.statusManual = packed.s || "disponivel";
+  base.alunoResponsavel = packed.a || "";
+  base.turmaGrupo = packed.t || "";
+  base.integrantesGrupo = Array.isArray(packed.g) ? packed.g : [];
+  base.updatedAt = packed.u || 0;
+
+  if (packed.i) {
+    CHECKLIST_ITEMS_TEMPLATE.forEach(t => {
+      const arr = packed.i[t.id];
+      if (Array.isArray(arr)) {
+        base.itens[t.id] = {
+          retirada: arr[0] || "",
+          devolucao: arr[1] || "",
+          detalheAvaria: arr[2] || ""
+        };
+      }
+    });
+  }
+
+  const totalDays = Math.max(9, packed.n || 9);
+  base.dias = [];
+  for (let idx = 0; idx < totalDays; idx++) {
+    const arr = packed.d && packed.d[idx];
+    if (Array.isArray(arr)) {
+      base.dias.push({
+        dia: arr[0] || `Dia ${idx + 1}`,
+        data: arr[1] || "",
+        retiradaHora: arr[2] || "",
+        retiradaAluno: arr[3] || "",
+        retiradaProf: arr[4] || "",
+        devolucaoHora: arr[5] || "",
+        devolucaoAluno: arr[6] || "",
+        devolucaoProf: arr[7] || "",
+        observacoes: arr[8] || ""
+      });
+    } else {
+      base.dias.push({
+        dia: `Dia ${idx + 1}`,
+        data: "",
+        retiradaHora: "",
+        retiradaAluno: "",
+        retiradaProf: "",
+        devolucaoHora: "",
+        devolucaoAluno: "",
+        devolucaoProf: "",
+        observacoes: ""
+      });
+    }
+  }
+
+  return base;
+}
+
+function toBase64Url(str) {
+  const bytes = new TextEncoder().encode(str);
+  let binary = "";
+  bytes.forEach(b => (binary += String.fromCharCode(b)));
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function fromBase64Url(b64) {
+  let norm = b64.replace(/-/g, "+").replace(/_/g, "/");
+  while (norm.length % 4) norm += "=";
+  const binary = atob(norm);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+function setCloudBadge(status, text) {
+  const el = document.getElementById("cloud-status-badge");
+  if (!el) return;
+  el.className = `cloud-badge ${status}`;
+  el.textContent = text;
+}
+
+// Salva 1 kit específico no banco em nuvem permanente (KeyValue) + canal em tempo real (ntfy)
+async function pushKitToCloud(patrimonio, showToastOnSuccess = false) {
+  const kit = state.kits[patrimonio];
+  if (!kit) return;
+
+  setCloudBadge("saving", "🟡 Salvando no banco em nuvem...");
+
+  try {
+    const packed = packKit(kit);
+    const jsonStr = JSON.stringify(packed);
+    const b64 = toBase64Url(jsonStr);
+
+    // Divide em blocos de 800 caracteres para caber com folga no limite de 1024 do KeyValue
+    const CHUNK_SIZE = 800;
+    const chunks = [];
+    for (let i = 0; i < b64.length; i += CHUNK_SIZE) {
+      chunks.push(b64.slice(i, i + CHUNK_SIZE));
+    }
+    if (chunks.length === 0) chunks.push("");
+
+    // Salva metadado de quantos blocos existem se > 1, ou junta no primeiro bloco o prefixo "N:"
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const payload = idx === 0 ? `${chunks.length}_${chunks[idx]}` : chunks[idx];
+      await fetch(
+        `${KV_BASE_URL}/UpdateValue/${KV_APP_KEY}/r50_${patrimonio}_${idx}?value=${encodeURIComponent(payload)}`,
+        { method: "POST" }
+      );
+    }
+
+    // Dispara atualização instantânea via SSE (ntfy.sh) para todos os outros dispositivos abertos
+    fetch(`https://ntfy.sh/${NTFY_TOPIC}`, {
+      method: "POST",
+      body: JSON.stringify({
+        cid: CLIENT_ID,
+        p: patrimonio,
+        packed
+      })
+    }).catch(() => {});
+
+    setCloudBadge("online", "🟢 Banco em Nuvem: Salvo em Tempo Real");
+    if (showToastOnSuccess) {
+      showToast(`✅ Checklist do Patrimônio ${patrimonio} salvo no banco em nuvem!`);
+    }
+  } catch (err) {
+    console.error("Erro ao salvar na nuvem:", err);
+    setCloudBadge("error", "🔴 Erro de conexão (salvo localmente)");
+  }
+}
+
+async function fetchKitFromCloud(patrimonio, defaultKitNumero) {
+  try {
+    const res0 = await fetch(`${KV_BASE_URL}/GetValue/${KV_APP_KEY}/r50_${patrimonio}_0`, {
+      cache: "no-store"
+    });
+    if (!res0.ok) return null;
+    const raw0 = await res0.json();
+    if (!raw0 || typeof raw0 !== "string") return null;
+
+    let totalChunks = 1;
+    let firstPart = raw0;
+    const sepIdx = raw0.indexOf("_");
+    if (sepIdx > 0 && sepIdx <= 2 && !isNaN(Number(raw0.slice(0, sepIdx)))) {
+      totalChunks = Number(raw0.slice(0, sepIdx));
+      firstPart = raw0.slice(sepIdx + 1);
+    }
+
+    const parts = [firstPart];
+    for (let idx = 1; idx < totalChunks; idx++) {
+      const resN = await fetch(`${KV_BASE_URL}/GetValue/${KV_APP_KEY}/r50_${patrimonio}_${idx}`, {
+        cache: "no-store"
+      });
+      if (resN.ok) {
+        const partN = await resN.json();
+        if (partN) parts.push(partN);
+      }
+    }
+
+    const fullB64 = parts.join("");
+    if (!fullB64) return null;
+    const decodedJson = fromBase64Url(fullB64);
+    const packed = JSON.parse(decodedJson);
+    return unpackKit(patrimonio, defaultKitNumero, packed);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function syncFromCloud(manualNotify = false) {
+  setCloudBadge("saving", "🔄 Sincronizando banco em nuvem...");
+  let updatedAny = false;
+
+  try {
+    await Promise.all(
+      DEFAULT_PATRIMONIOS.map(async ({ patrimonio, kitNumero }) => {
+        const remoteKit = await fetchKitFromCloud(patrimonio, kitNumero);
+        if (remoteKit) {
+          const localKit = state.kits[patrimonio];
+          if (!localKit || (remoteKit.updatedAt || 0) >= (localKit.updatedAt || 0)) {
+            state.kits[patrimonio] = remoteKit;
+            updatedAny = true;
+          } else if ((localKit.updatedAt || 0) > (remoteKit.updatedAt || 0)) {
+            // O dispositivo local tem dados mais recentes não enviados: envia para a nuvem
+            await pushKitToCloud(patrimonio, false);
+          }
+        } else {
+          // Verifica se o kit local já tem dados preenchidos para subir à nuvem
+          const localKit = state.kits[patrimonio];
+          if (localKit && localKit.updatedAt > 0) {
+            await pushKitToCloud(patrimonio, false);
+          }
+        }
+      })
+    );
+
+    if (updatedAny) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      renderAll();
+    }
+
+    setCloudBadge("online", "🟢 Banco em Nuvem: Sincronizado em Tempo Real");
+    if (manualNotify) {
+      showToast("🔄 Dados sincronizados com o banco em nuvem!");
+    }
+  } catch (err) {
+    console.error("Erro na sincronização:", err);
+    setCloudBadge("error", "🔴 Modo Offline (usando cache local)");
+  }
+}
+
+function startRealtimeListener() {
+  if (sseConnection) {
+    try {
+      sseConnection.close();
+    } catch (e) {}
+  }
+
+  try {
+    sseConnection = new EventSource(`https://ntfy.sh/${NTFY_TOPIC}/sse`);
+    sseConnection.onmessage = event => {
+      try {
+        const outer = JSON.parse(event.data);
+        if (!outer || !outer.message) return;
+        const msg = JSON.parse(outer.message);
+        if (!msg || msg.cid === CLIENT_ID || !msg.p || !msg.packed) return;
+
+        const patr = msg.p;
+        const defObj = DEFAULT_PATRIMONIOS.find(x => x.patrimonio === patr);
+        if (!defObj) return;
+
+        const incomingKit = unpackKit(patr, defObj.kitNumero, msg.packed);
+        const currentKit = state.kits[patr];
+
+        if (!currentKit || (incomingKit.updatedAt || 0) >= (currentKit.updatedAt || 0)) {
+          state.kits[patr] = incomingKit;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          renderAll();
+          setCloudBadge("online", "🟢 Atualizado em tempo real!");
+        }
+      } catch (e) {}
+    };
+  } catch (e) {
+    console.warn("SSE indisponível:", e);
+  }
 }
 
 function loadState() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    // Tenta carregar v2 ou migrar da v1
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem("canon_r50_checklist_v1");
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && parsed.kits) {
@@ -149,32 +454,75 @@ function loadState() {
   }
 
   // Garantir que todos os 8 patrimônios existam
-  let addedNew = false;
   DEFAULT_PATRIMONIOS.forEach(p => {
     if (!state.kits[p.patrimonio]) {
       state.kits[p.patrimonio] = createEmptyKitData(p.patrimonio, p.kitNumero);
-      addedNew = true;
     }
   });
-  if (addedNew) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function scheduleCloudSave(patrimonio, immediate = false, showConfirm = false) {
+  const kit = state.kits[patrimonio];
+  if (kit) {
+    kit.updatedAt = Date.now();
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+
+  if (cloudSaveTimers[patrimonio]) {
+    clearTimeout(cloudSaveTimers[patrimonio]);
+  }
+
+  if (immediate) {
+    pushKitToCloud(patrimonio, showConfirm);
+  } else {
+    setCloudBadge("saving", "🟡 Digitando... salvando automaticamente");
+    cloudSaveTimers[patrimonio] = setTimeout(() => {
+      pushKitToCloud(patrimonio, showConfirm);
+    }, 550);
   }
 }
 
-function saveState(toastMsg) {
+function saveState(toastMsg, immediateCloud = true, targetPatrimonio = null) {
+  const patr = targetPatrimonio || state.selectedPatrimonio;
+  if (state.kits[patr]) {
+    state.kits[patr].updatedAt = Date.now();
+  }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   renderAll();
   if (toastMsg) showToast(toastMsg);
+  scheduleCloudSave(patr, immediateCloud, false);
+}
+
+function saveCurrentKitNow() {
+  const patr = state.selectedPatrimonio;
+  if (state.kits[patr]) {
+    state.kits[patr].updatedAt = Date.now();
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  renderAll();
+  pushKitToCloud(patr, true);
+}
+
+async function forceSaveAndSyncAll() {
+  setCloudBadge("saving", "🟡 Salvando todas as fichas na nuvem...");
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  for (const { patrimonio } of DEFAULT_PATRIMONIOS) {
+    const kit = state.kits[patrimonio];
+    if (kit) {
+      kit.updatedAt = Date.now();
+      await pushKitToCloud(patrimonio, false);
+    }
+  }
+  showToast("✅ Todos os 8 Kits foram salvos no banco em nuvem!");
 }
 
 function computeKitStatus(kit) {
-  // Verifica se há algum item marcado como AVARIADO
   const hasAvariaItem = Object.values(kit.itens).some(
     i => i.retirada === "AVARIADO" || i.devolucao === "AVARIADO"
   );
   if (hasAvariaItem || kit.statusManual === "avaria") return "avaria";
 
-  // Verifica se há dia com retirada preenchida mas sem devolução
   const hasOpenDay = kit.dias.some(
     d => (d.retiradaHora || d.retiradaAluno) && !d.devolucaoHora && !d.devolucaoAluno
   );
@@ -201,7 +549,8 @@ function switchTab(tabId) {
 
 function openCameraFicha(patrimonio) {
   state.selectedPatrimonio = patrimonio;
-  saveState();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  renderAll();
   switchTab("ficha");
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -212,6 +561,14 @@ function renderAll() {
   renderDashboardCards();
   renderFichaSelector();
   renderFichaContent();
+  renderAlunosTable();
+}
+
+// Atualiza apenas indicadores visuais sem recriar os inputs em foco
+function renderSummariesOnly() {
+  renderStats();
+  renderDashboardCards();
+  renderFichaSelector();
   renderAlunosTable();
 }
 
@@ -245,9 +602,12 @@ function renderDashboardCards() {
     const okDevolucaoCount = Object.values(kit.itens).filter(i => i.devolucao === "OK").length;
     const diasUsados = kit.dias.filter(d => d.data || d.retiradaHora || d.retiradaAluno).length;
 
-    const integrantesText = kit.integrantesGrupo && kit.integrantesGrupo.length > 0
-      ? `+ ${kit.integrantesGrupo.length} integrante(s): ${kit.integrantesGrupo.join(", ")}`
-      : (kit.turmaGrupo ? `Turma/Grupo: ${kit.turmaGrupo}` : "Nenhum grupo vinculado");
+    const integrantesText =
+      kit.integrantesGrupo && kit.integrantesGrupo.length > 0
+        ? `+ ${kit.integrantesGrupo.length} integrante(s): ${kit.integrantesGrupo.join(", ")}`
+        : kit.turmaGrupo
+        ? `Turma/Grupo: ${kit.turmaGrupo}`
+        : "Nenhum grupo vinculado";
 
     const card = document.createElement("div");
     card.className = `camera-card status-${status}`;
@@ -263,7 +623,11 @@ function renderDashboardCards() {
 
         <div class="camera-assignment" style="margin-top: 0.9rem;">
           <div class="label">Aluno Responsável</div>
-          <div class="value">${kit.alunoResponsavel ? escapeHtml(kit.alunoResponsavel) : "<span style='color:var(--text-muted)'>Não atribuído</span>"}</div>
+          <div class="value">${
+            kit.alunoResponsavel
+              ? escapeHtml(kit.alunoResponsavel)
+              : "<span style='color:var(--text-muted)'>Não atribuído</span>"
+          }</div>
           <div class="sub-value">${escapeHtml(integrantesText)}</div>
         </div>
 
@@ -298,7 +662,8 @@ function renderFichaSelector() {
     btn.className = `patrimonio-pill ${state.selectedPatrimonio === patrimonio ? "active" : ""}`;
     btn.onclick = () => {
       state.selectedPatrimonio = patrimonio;
-      saveState();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      renderAll();
     };
     btn.innerHTML = `
       <span class="dot ${status}"></span>
@@ -312,7 +677,6 @@ function renderFichaContent() {
   const kit = state.kits[state.selectedPatrimonio];
   if (!kit) return;
 
-  // Cabeçalho da Ficha selecionada
   document.getElementById("current-patrimonio-display").textContent = kit.patrimonio;
   document.getElementById("ficha-kit-numero").value = kit.kitNumero || "";
   document.getElementById("ficha-status-manual").value = kit.statusManual || "disponivel";
@@ -369,7 +733,7 @@ function renderFichaContent() {
             ? `<input type="text" class="input-compact" style="margin-top:0.4rem; border-color:#f87171;"
                  placeholder="Descreva a avaria ou observação deste item..."
                  value="${escapeHtml(itemState.detalheAvaria || "")}"
-                 onchange="updateItemNote('${template.id}', this.value)">`
+                 oninput="updateItemNote('${template.id}', this.value)">`
             : ""
         }
       </td>
@@ -397,7 +761,6 @@ function renderFichaContent() {
   const tbodyDias = document.getElementById("daily-log-tbody");
   tbodyDias.innerHTML = "";
 
-  // Datalist com nomes dos alunos para facilitar preenchimento do visto
   const datalistId = "alunos-datalist";
   let datalist = document.getElementById(datalistId);
   if (!datalist) {
@@ -415,44 +778,44 @@ function renderFichaContent() {
       <td class="daily-label">${escapeHtml(d.dia)}</td>
       <td style="width: 135px;">
         <input type="date" class="input-compact" value="${escapeHtml(d.data)}"
-          onchange="updateDailyLog(${idx}, 'data', this.value)">
+          oninput="updateDailyLog(${idx}, 'data', this.value)">
       </td>
       <td>
         <div class="daily-subgrid">
           <div class="time-with-btn">
             <input type="time" class="input-compact" value="${escapeHtml(d.retiradaHora)}"
-              onchange="updateDailyLog(${idx}, 'retiradaHora', this.value)">
+              oninput="updateDailyLog(${idx}, 'retiradaHora', this.value)">
             <button type="button" class="btn-now" title="Usar hora atual e preencher aluno responsável"
               onclick="fillQuickAction(${idx}, 'retirada')">Agora</button>
           </div>
           <input type="text" list="${datalistId}" class="input-compact" placeholder="Visto Aluno"
             value="${escapeHtml(d.retiradaAluno)}"
-            onchange="updateDailyLog(${idx}, 'retiradaAluno', this.value)">
+            oninput="updateDailyLog(${idx}, 'retiradaAluno', this.value)">
           <input type="text" class="input-compact" placeholder="Visto Prof."
             value="${escapeHtml(d.retiradaProf)}"
-            onchange="updateDailyLog(${idx}, 'retiradaProf', this.value)">
+            oninput="updateDailyLog(${idx}, 'retiradaProf', this.value)">
         </div>
       </td>
       <td>
         <div class="daily-subgrid">
           <div class="time-with-btn">
             <input type="time" class="input-compact" value="${escapeHtml(d.devolucaoHora)}"
-              onchange="updateDailyLog(${idx}, 'devolucaoHora', this.value)">
+              oninput="updateDailyLog(${idx}, 'devolucaoHora', this.value)">
             <button type="button" class="btn-now" title="Usar hora atual e preencher aluno responsável"
               onclick="fillQuickAction(${idx}, 'devolucao')">Agora</button>
           </div>
           <input type="text" list="${datalistId}" class="input-compact" placeholder="Visto Aluno"
             value="${escapeHtml(d.devolucaoAluno)}"
-            onchange="updateDailyLog(${idx}, 'devolucaoAluno', this.value)">
+            oninput="updateDailyLog(${idx}, 'devolucaoAluno', this.value)">
           <input type="text" class="input-compact" placeholder="Visto Prof."
             value="${escapeHtml(d.devolucaoProf)}"
-            onchange="updateDailyLog(${idx}, 'devolucaoProf', this.value)">
+            oninput="updateDailyLog(${idx}, 'devolucaoProf', this.value)">
         </div>
       </td>
       <td>
         <input type="text" class="input-compact" placeholder="Observações / Avarias..."
           value="${escapeHtml(d.observacoes)}"
-          onchange="updateDailyLog(${idx}, 'observacoes', this.value)">
+          oninput="updateDailyLog(${idx}, 'observacoes', this.value)">
       </td>
     `;
     tbodyDias.appendChild(tr);
@@ -460,66 +823,85 @@ function renderFichaContent() {
 }
 
 // Manipuladores de Eventos da Ficha
-function updateKitHeader(field, value) {
-  const kit = state.kits[state.selectedPatrimonio];
+function updateKitHeader(field, value, immediateRender = false) {
+  const patr = state.selectedPatrimonio;
+  const kit = state.kits[patr];
   if (!kit) return;
   kit[field] = value;
-  saveState("Dados do kit atualizados!");
+
+  if (immediateRender) {
+    saveState("Dados do kit salvos na nuvem!", true, patr);
+  } else {
+    renderSummariesOnly();
+    scheduleCloudSave(patr, false, false);
+  }
 }
 
 function addIntegrante(nome) {
   if (!nome) return;
-  const kit = state.kits[state.selectedPatrimonio];
+  const patr = state.selectedPatrimonio;
+  const kit = state.kits[patr];
   if (!kit.integrantesGrupo) kit.integrantesGrupo = [];
   if (!kit.integrantesGrupo.includes(nome)) {
     kit.integrantesGrupo.push(nome);
-    saveState("Integrante adicionado ao grupo!");
+    saveState("Integrante adicionado e salvo na nuvem!", true, patr);
   }
   document.getElementById("ficha-add-integrante").value = "";
 }
 
 function removeIntegrante(idx) {
-  const kit = state.kits[state.selectedPatrimonio];
+  const patr = state.selectedPatrimonio;
+  const kit = state.kits[patr];
   if (!kit || !kit.integrantesGrupo) return;
   kit.integrantesGrupo.splice(idx, 1);
-  saveState("Integrante removido.");
+  saveState("Integrante removido.", true, patr);
 }
 
 function setItemCheck(itemId, stage, value) {
-  const kit = state.kits[state.selectedPatrimonio];
+  const patr = state.selectedPatrimonio;
+  const kit = state.kits[patr];
   if (!kit) return;
   const current = kit.itens[itemId][stage];
   kit.itens[itemId][stage] = current === value ? "" : value;
-  saveState();
+  saveState(null, true, patr);
 }
 
 function updateItemNote(itemId, note) {
-  const kit = state.kits[state.selectedPatrimonio];
+  const patr = state.selectedPatrimonio;
+  const kit = state.kits[patr];
   if (!kit) return;
   kit.itens[itemId].detalheAvaria = note;
-  saveState("Observação de avaria registrada.");
+  scheduleCloudSave(patr, false, false);
 }
 
 function markAllItems(stage, value) {
-  const kit = state.kits[state.selectedPatrimonio];
+  const patr = state.selectedPatrimonio;
+  const kit = state.kits[patr];
   if (!kit) return;
   CHECKLIST_ITEMS_TEMPLATE.forEach(t => {
     kit.itens[t.id][stage] = value;
   });
   if (stage === "retirada") kit.statusManual = "em_uso";
   if (stage === "devolucao") kit.statusManual = "disponivel";
-  saveState(`Todos os itens marcados como ${value} na ${stage === "retirada" ? "Retirada" : "Devolução"}!`);
+  saveState(
+    `Todos os itens marcados como ${value} na ${stage === "retirada" ? "Retirada" : "Devolução"} e salvos na nuvem!`,
+    true,
+    patr
+  );
 }
 
 function updateDailyLog(dayIdx, field, value) {
-  const kit = state.kits[state.selectedPatrimonio];
+  const patr = state.selectedPatrimonio;
+  const kit = state.kits[patr];
   if (!kit || !kit.dias[dayIdx]) return;
   kit.dias[dayIdx][field] = value;
-  saveState();
+  renderSummariesOnly();
+  scheduleCloudSave(patr, false, false);
 }
 
 function fillQuickAction(dayIdx, type) {
-  const kit = state.kits[state.selectedPatrimonio];
+  const patr = state.selectedPatrimonio;
+  const kit = state.kits[patr];
   if (!kit || !kit.dias[dayIdx]) return;
 
   const now = new Date();
@@ -540,19 +922,20 @@ function fillQuickAction(dayIdx, type) {
       dayObj.retiradaAluno = kit.alunoResponsavel;
     }
     kit.statusManual = "em_uso";
-    saveState(`Retirada registrada no ${dayObj.dia} às ${hh}:${min}!`);
+    saveState(`Retirada registrada no ${dayObj.dia} às ${hh}:${min} e salva na nuvem!`, true, patr);
   } else {
     dayObj.devolucaoHora = `${hh}:${min}`;
     if (!dayObj.devolucaoAluno && (dayObj.retiradaAluno || kit.alunoResponsavel)) {
       dayObj.devolucaoAluno = dayObj.retiradaAluno || kit.alunoResponsavel;
     }
     kit.statusManual = "disponivel";
-    saveState(`Devolução registrada no ${dayObj.dia} às ${hh}:${min}!`);
+    saveState(`Devolução registrada no ${dayObj.dia} às ${hh}:${min} e salva na nuvem!`, true, patr);
   }
 }
 
 function addExtraDay() {
-  const kit = state.kits[state.selectedPatrimonio];
+  const patr = state.selectedPatrimonio;
+  const kit = state.kits[patr];
   if (!kit) return;
   const nextNum = kit.dias.length + 1;
   kit.dias.push({
@@ -566,7 +949,7 @@ function addExtraDay() {
     devolucaoProf: "",
     observacoes: ""
   });
-  saveState(`Dia ${nextNum} adicionado à ficha!`);
+  saveState(`Dia ${nextNum} adicionado à ficha!`, true, patr);
 }
 
 function clearCurrentKitFicha() {
@@ -574,7 +957,8 @@ function clearCurrentKitFicha() {
   const kit = state.kits[patr];
   if (!confirm(`Tem certeza que deseja limpar os dados da ficha da câmera Patrimônio ${patr}?`)) return;
   state.kits[patr] = createEmptyKitData(patr, kit.kitNumero);
-  saveState(`Ficha do patrimônio ${patr} limpa com sucesso.`);
+  state.kits[patr].updatedAt = Date.now();
+  saveState(`Ficha do patrimônio ${patr} limpa com sucesso.`, true, patr);
 }
 
 // Aba de Alunos (32 Alunos)
@@ -589,11 +973,11 @@ function renderAlunosTable() {
   state.alunos
     .filter(a => a.nome.toLowerCase().includes(search) || String(a.numero).includes(search))
     .forEach(aluno => {
-      // Verifica em quais câmeras o aluno é responsável ou integrante ou tem visto
-      const linkedKits = kitsList.filter(k =>
-        k.alunoResponsavel === aluno.nome ||
-        (k.integrantesGrupo && k.integrantesGrupo.includes(aluno.nome)) ||
-        k.dias.some(d => d.retiradaAluno === aluno.nome || d.devolucaoAluno === aluno.nome)
+      const linkedKits = kitsList.filter(
+        k =>
+          k.alunoResponsavel === aluno.nome ||
+          (k.integrantesGrupo && k.integrantesGrupo.includes(aluno.nome)) ||
+          k.dias.some(d => d.retiradaAluno === aluno.nome || d.devolucaoAluno === aluno.nome)
       );
 
       const kitsBadges = linkedKits.length
@@ -631,13 +1015,13 @@ function assignStudentToKit(studentName, patrimonio) {
   const kit = state.kits[patrimonio];
   if (!kit.alunoResponsavel) {
     kit.alunoResponsavel = studentName;
-    saveState(`${studentName} definido(a) como Aluno Responsável do Patr. ${patrimonio}!`);
+    saveState(`${studentName} definido(a) como Aluno Responsável do Patr. ${patrimonio}!`, true, patrimonio);
   } else if (kit.alunoResponsavel !== studentName) {
     if (!kit.integrantesGrupo) kit.integrantesGrupo = [];
     if (!kit.integrantesGrupo.includes(studentName)) {
       kit.integrantesGrupo.push(studentName);
     }
-    saveState(`${studentName} adicionado(a) ao grupo da câmera Patr. ${patrimonio}!`);
+    saveState(`${studentName} adicionado(a) ao grupo da câmera Patr. ${patrimonio}!`, true, patrimonio);
   }
 }
 
@@ -708,7 +1092,9 @@ function buildPrintHtmlForKit(kit) {
           <span><strong>Nº de Patrimônio:</strong> [ <strong>${escapeHtml(kit.patrimonio)}</strong> ]</span>
         </div>
         <div class="print-id-row">
-          <span><strong>Nome do Aluno Responsável:</strong> ${escapeHtml(kit.alunoResponsavel || "__________________________________________________")}</span>
+          <span><strong>Nome do Aluno Responsável:</strong> ${escapeHtml(
+            kit.alunoResponsavel || "__________________________________________________"
+          )}</span>
         </div>
         <div class="print-id-row" style="margin-bottom:0;">
           <span><strong>Turma / Grupo:</strong> ${escapeHtml(grupoExtra)}</span>
@@ -779,12 +1165,19 @@ function importBackupJson(event) {
   const file = event.target.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = e => {
+  reader.onload = async e => {
     try {
       const imported = JSON.parse(e.target.result);
       if (imported && imported.kits) {
         state = imported;
-        saveState("Backup restaurado com sucesso!");
+        DEFAULT_PATRIMONIOS.forEach(p => {
+          if (!state.kits[p.patrimonio]) {
+            state.kits[p.patrimonio] = createEmptyKitData(p.patrimonio, p.kitNumero);
+          }
+        });
+        renderAll();
+        await forceSaveAndSyncAll();
+        showToast("Backup restaurado e sincronizado na nuvem!");
       } else {
         alert("Arquivo JSON inválido.");
       }
@@ -818,7 +1211,9 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   loadState();
   renderAll();
+  await syncFromCloud(false);
+  startRealtimeListener();
 });
