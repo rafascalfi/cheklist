@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Checklist & Controle de Equipamento — Canon EOS R50</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Cabeçalho -->
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand">
+        <div class="brand-badge">
+          CANON
+          <span>EOS R50</span>
+        </div>
+        <div class="brand-title">
+          <h1>Ficha de Checklist e Controle de Equipamento Fotográfico</h1>
+          <p>Unidade Curricular: Fotografia Digital &bull; 7 Câmeras Cadastradas &bull; 32 Alunos</p>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <button class="btn btn-secondary btn-sm" onclick="printSingleKit()">
+          🖨️ Imprimir Ficha Atual
+        </button>
+        <button class="btn btn-secondary btn-sm" onclick="printAllKits()">
+          📑 Imprimir Todas (7 Câmeras)
+        </button>
+        <button class="btn btn-outline btn-sm" onclick="exportBackupJson()">
+          💾 Salvar Backup
+        </button>
+        <label class="btn btn-outline btn-sm" style="cursor:pointer;">
+          📂 Restaurar Backup
+          <input type="file" accept=".json" style="display:none;" onchange="importBackupJson(event)" />
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <!-- Navegação por Abas -->
+  <nav class="nav-tabs">
+    <button class="tab-btn active" data-tab="painel" onclick="switchTab('painel')">
+      📷 Painel das 7 Câmeras (Patrimônios)
+    </button>
+    <button class="tab-btn" data-tab="ficha" onclick="switchTab('ficha')">
+      📋 Ficha de Checklist Completa
+    </button>
+    <button class="tab-btn" data-tab="alunos" onclick="switchTab('alunos')">
+      🎓 Lista de Alunos (32)
+    </button>
+  </nav>
+
+  <!-- Conteúdo Principal -->
+  <main class="main-container">
+
+    <!-- ABA 1: PAINEL GERAL DAS CÂMERAS -->
+    <section id="tab-painel" class="tab-panel active">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-info">
+            <span>Total de Kits Canon R50</span>
+            <h3 id="stat-total">7</h3>
+          </div>
+          <div class="stat-icon blue">📷</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-info">
+            <span>Disponíveis</span>
+            <h3 id="stat-disp">7</h3>
+          </div>
+          <div class="stat-icon green">✓</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-info">
+            <span>Em Uso (Retiradas)</span>
+            <h3 id="stat-uso">0</h3>
+          </div>
+          <div class="stat-icon amber">📤</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-info">
+            <span>Com Avaria / Alerta</span>
+            <h3 id="stat-avaria">0</h3>
+          </div>
+          <div class="stat-icon red">⚠️</div>
+        </div>
+      </div>
+
+      <div id="cameras-grid" class="cameras-grid"></div>
+    </section>
+
+    <!-- ABA 2: FICHA DE CHECKLIST COMPLETA -->
+    <section id="tab-ficha" class="tab-panel">
+
+      <!-- Barra Seletora de Patrimônio -->
+      <div class="ficha-selector-bar">
+        <div>
+          <div style="font-size:0.78rem; text-transform:uppercase; color:var(--text-secondary); font-weight:700; margin-bottom:0.4rem;">
+            Selecione o Nº de Patrimônio da Câmera:
+          </div>
+          <div id="patrimonio-pills" class="patrimonio-pills"></div>
+        </div>
+        <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+          <button class="btn btn-secondary btn-sm" onclick="printSingleKit()">
+            🖨️ Imprimir Esta Ficha
+          </button>
+          <button class="btn btn-outline btn-sm" style="color:#f87171; border-color:#7f1d1d;" onclick="clearCurrentKitFicha()">
+            🗑️ Limpar Ficha
+          </button>
+        </div>
+      </div>
+
+      <!-- 1. Identificação do Kit e do Aluno -->
+      <div class="ficha-section">
+        <div class="ficha-section-header">
+          <div class="ficha-section-title">
+            <span class="step-num">1</span>
+            <span>Identificação do Kit e do Aluno — Patrimônio <strong id="current-patrimonio-display" style="color:#f87171;"></strong></span>
+          </div>
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <label style="font-size:0.8rem; color:var(--text-secondary); font-weight:600;">Status do Kit:</label>
+            <select id="ficha-status-manual" class="input-compact" style="width:auto;" onchange="updateKitHeader('statusManual', this.value)">
+              <option value="disponivel">🟢 Disponível</option>
+              <option value="em_uso">🟡 Em Uso (Retirada)</option>
+              <option value="avaria">🔴 Com Avaria</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Nº da Caixa / Identificação do Kit</label>
+            <input type="text" id="ficha-kit-numero" class="form-control" placeholder="Ex: Kit 01 / Caixa 01"
+              onchange="updateKitHeader('kitNumero', this.value)" />
+          </div>
+
+          <div class="form-group">
+            <label>Nome do Aluno Responsável</label>
+            <select id="ficha-aluno-responsavel" class="form-control"
+              onchange="updateKitHeader('alunoResponsavel', this.value)">
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Turma / Nome do Grupo</label>
+            <input type="text" id="ficha-turma-grupo" class="form-control" placeholder="Ex: Fotografia Digital - Grupo A"
+              onchange="updateKitHeader('turmaGrupo', this.value)" />
+          </div>
+        </div>
+
+        <div class="group-members-area">
+          <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:0.75rem;">
+            <label style="font-size:0.82rem; font-weight:600; color:var(--text-secondary); text-transform:uppercase;">
+              👥 Outros Integrantes do Grupo / Dupla (Opcional):
+            </label>
+            <select id="ficha-add-integrante" class="input-compact" style="max-width:340px;"
+              onchange="addIntegrante(this.value)">
+            </select>
+          </div>
+          <div id="integrantes-chips" class="chips-container"></div>
+        </div>
+      </div>
+
+      <!-- 2. Itens do Kit (Checklist de Verificação de Componentes) -->
+      <div class="ficha-section">
+        <div class="ficha-section-header">
+          <div class="ficha-section-title">
+            <span class="step-num">2</span>
+            <span>Itens do Kit (Checklist de Verificação de Componentes)</span>
+          </div>
+          <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+            <button type="button" class="btn btn-success btn-sm" onclick="markAllItems('retirada', 'OK')">
+              ✓ Marcar Todos OK na Retirada
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="markAllItems('devolucao', 'OK')">
+              ✓ Marcar Todos OK na Devolução
+            </button>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="checklist-table">
+            <thead>
+              <tr>
+                <th style="width: 20%;">Item</th>
+                <th style="width: 44%;">Componente / Descrição</th>
+                <th style="width: 18%;">📤 Estado na Retirada (Início)</th>
+                <th style="width: 18%;">📥 Estado na Devolução (Fim)</th>
+              </tr>
+            </thead>
+            <tbody id="checklist-items-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 3. Registro Diário de Retirada e Devolução -->
+      <div class="ficha-section">
+        <div class="ficha-section-header">
+          <div class="ficha-section-title">
+            <span class="step-num">3</span>
+            <span>Registro Diário de Retirada e Devolução (Vistos duplos: Aluno e Professor)</span>
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="addExtraDay()">
+            ➕ Adicionar Mais um Dia/Aula
+          </button>
+        </div>
+
+        <div class="table-responsive">
+          <table class="daily-table">
+            <thead>
+              <tr>
+                <th style="width: 85px;">Dia / Aula</th>
+                <th style="width: 135px;">Data</th>
+                <th>📤 RETIRADA (SAÍDA)<br/><small>Hora | Visto Aluno | Visto Prof.</small></th>
+                <th>📥 DEVOLUÇÃO (RETORNO)<br/><small>Hora | Visto Aluno | Visto Prof.</small></th>
+                <th style="width: 220px;">Observações / Avarias</th>
+              </tr>
+            </thead>
+            <tbody id="daily-log-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ABA 3: LISTA DE ALUNOS (32 ALUNOS) -->
+    <section id="tab-alunos" class="tab-panel">
+      <div class="ficha-section">
+        <div class="students-toolbar">
+          <div>
+            <h2 style="font-size:1.15rem; font-weight:700;">🎓 Lista de Alunos da Turma (32 Alunos)</h2>
+            <p style="font-size:0.85rem; color:var(--text-secondary);">
+              Consulte rapidamente qual câmera/patrimônio cada aluno está utilizando ou vincule um aluno diretamente a um Kit.
+            </p>
+          </div>
+          <div class="search-box">
+            <input type="text" id="student-search" class="form-control" placeholder="🔍 Buscar aluno por nome ou número..."
+              oninput="renderAlunosTable()" />
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="students-table">
+            <thead>
+              <tr>
+                <th>Nº</th>
+                <th>Nome do Aluno</th>
+                <th>Câmera / Patrimônio Vinculado</th>
+                <th style="text-align:right;">Ação Rápida</th>
+              </tr>
+            </thead>
+            <tbody id="students-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Área exclusiva para impressão A4 idêntica à Ficha DOCX -->
+  <div id="print-area" class="print-only"></div>
+
+  <!-- Notificações Toast -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="script.js"></script>
+</body>
+</html>
